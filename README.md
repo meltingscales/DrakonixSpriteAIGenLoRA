@@ -69,34 +69,29 @@ new *style* (pixel art) cheaply.
 Sources: [Stable Diffusion Art — How to train LoRA models](https://stable-diffusion-art.com/train-lora/),
 [SeaArt — dataset creation guide](https://docs.seaart.ai/guide-1/3-advanced-guide/3-2-lora-training-advance/how-to-create-dataset-for-training)
 
-## what's left to build
+## status
 
-Roughly in order, since each step's output feeds the next:
+All five original build steps are done: dataset (`just data`, 17 curated
+images — see AI-NOTES.md for sourcing/licensing details), training
+(`just train` / the GUI's Train tab, `src/drakonix_lora/train.py`), and
+inference (GUI's Generate tab, loads a cached base pipeline + swaps in
+the selected LoRA). Verified end-to-end with a real 1500-step checkpoint
+— generated output visibly carries the trained pixel-art style (flat
+shading, black outlines, blocky palette).
 
-1. **Source or build a captioned pixel-art dataset.** Either find an
-   existing CC0/openly-licensed captioned pixel-art set, or caption
-   sprites ourselves (manually, or with a vision-captioning model as a
-   first pass then human review). 15–30 good examples is the realistic
-   starting target, not thousands.
-2. **Preprocessing script**: nearest-neighbor upscale sprites to
-   512x512(ish), write matching caption `.txt` files into
-   `data/captions/`.
-3. **Training script** (`src/drakonix_lora/train.py`, not yet written):
-   wraps `diffusers`' LoRA training utilities (see
-   [diffusers' text-to-image LoRA example](https://github.com/huggingface/diffusers/tree/main/examples/text_to_image)
-   as the reference implementation) with an epoch/step progress callback,
-   mirroring how DrakonixSpriteAIGen's `run_training()` reports progress
-   to its GUI.
-4. **Inference wiring**: load base SD1.5 + LoRA weights via
-   `diffusers.StableDiffusionPipeline` + `peft`, generate from a prompt.
-5. **Wire both into `gui.py`**, which already has the tab structure/
-   controls in place — the Train and Generate buttons currently raise a
-   clear "not implemented yet" error instead of pretending to work.
+Open threads, not blockers:
+- Only the UNet is trained (text encoder frozen) — reasonable first cut,
+  but text-encoder LoRA is a lever if style transfer feels too shallow.
+- No inference-side upscale/palette-snap post-processing yet (see the
+  "dataset requirements" section above on why that matters for pixel
+  art).
+- Hyperparameters (rank 16, lr 1e-4, clip skip 2) are untuned defaults,
+  not the result of a sweep.
 
 ## what's already ported from DrakonixSpriteAIGen
 
-- `justfile` — `just setup` (uv sync), `just gui`, `just test`. A `train`
-  recipe is stubbed out (commented) for once step 3 above exists.
+- `justfile` — `just setup` (uv sync), `just data` (fetch dataset),
+  `just train`, `just gui`, `just test`.
 - `pyproject.toml` — uv-managed, dependencies swapped for the LoRA stack
   (`diffusers`, `transformers`, `accelerate`, `peft` instead of `kaggle`).
 - `src/drakonix_lora/device.py` — GPU-probe-with-subprocess pattern,
@@ -104,7 +99,7 @@ Roughly in order, since each step's output feeds the next:
 - `src/drakonix_lora/gui.py` — Gradio Blocks structure (Train tab +
   Generate tab, checkpoint/weights dropdown with Refresh + on-page-load
   refresh) ported from the same pattern, fields adapted to LoRA
-  training/inference params. Buttons are stubbed until steps 3–4 exist.
+  training/inference params.
 - `tests/test_gui.py` — smoke test that the GUI builds, same pattern as
   the original repo's approach of actually exercising code rather than
   just reading it.
@@ -113,13 +108,24 @@ Roughly in order, since each step's output feeds the next:
 
 ```
 just setup
+just data    # fetch + prepare the curated dataset
 ```
 
-## GUI (currently a stub)
+## training
+
+```
+just train                      # default hyperparameters, 1500 steps
+just train data/captions runwayml/stable-diffusion-v1-5 10   # quick smoke test
+```
+
+Saves a `.safetensors` LoRA checkpoint to `lora_weights/`. Re-running with
+identical params refuses (pass `--force` via the CLI, or check "Force
+retrain" in the GUI) rather than silently redoing the same work.
+
+## GUI
 
 ```
 just gui
 ```
 
-Shows the intended Train/Generate tabs; both actions currently raise a
-clear "not implemented yet" error pointing back here.
+Train and Generate tabs are both live.
