@@ -9,6 +9,7 @@ weights.
 """
 
 import queue
+import re
 import threading
 import time
 from pathlib import Path
@@ -31,6 +32,8 @@ from .train import (
 # make the Generate tab unusably slow. Keyed on what's currently loaded so
 # switching LoRA files swaps just the adapter, not the whole pipeline.
 _state: dict = {"pipeline": None, "lora_path": None}
+
+OUTPUTS_DIR = Path("outputs")
 
 
 EXAMPLE_PROMPTS = [
@@ -81,6 +84,22 @@ def list_lora_weights() -> list[str]:
         return []
     paths = sorted(LORA_DIR.glob("*.safetensors"), key=lambda p: p.stat().st_mtime, reverse=True)
     return [str(p) for p in paths]
+
+
+def list_outputs() -> list[str]:
+    if not OUTPUTS_DIR.exists():
+        return []
+    paths = sorted(OUTPUTS_DIR.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return [str(p) for p in paths]
+
+
+def _save_output(image, prompt: str, index: int) -> Path:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", prompt).strip("-").lower()[:40] or "sprite"
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = OUTPUTS_DIR / f"{slug}_{stamp}_{index}.png"
+    image.save(path)
+    return path
 
 
 def refresh_lora_weights(current: str):
@@ -226,6 +245,8 @@ def generate(
                     num_images_per_prompt=batch_size,
                     callback_on_step_end=on_denoise_step,
                 )
+                for i, image in enumerate(result.images):
+                    _save_output(image, prompt, i)
                 images.extend(result.images)
             events.put(("done", images, None, None))
         except Exception as exc:  # re-raised on the main thread below
@@ -238,13 +259,13 @@ def generate(
         if kind == "step":
             frac, desc, preview = a, b, c
             progress(frac, desc=desc)
-            yield preview, gr.update(), desc
+            yield preview, gr.update(), desc, gr.update()
         elif kind == "error":
             raise gr.Error(f"generation failed: {a}")
         else:  # done
             images = a
             status = f"generated {len(images)} image(s) from {len(prompt_queue)} prompt(s)"
-            yield gr.update(), images, status
+            yield gr.update(), images, status, list_outputs()
             return
 
 
@@ -283,6 +304,12 @@ def build_app() -> gr.Blocks:
             )
             output = gr.Gallery(label="Generated sprites", columns=4)
 
+        with gr.Tab("Gallery"):
+            gallery_refresh_btn = gr.Button("Refresh")
+            gallery_view = gr.Gallery(
+                label="Previously generated sprites", columns=6, value=list_outputs()
+            )
+
         train_btn.click(
             train,
             inputs=[base_model, captions_dir, rank, steps, force],
@@ -292,8 +319,16 @@ def build_app() -> gr.Blocks:
         generate_btn.click(
             generate,
             inputs=[lora_path, prompts, guidance, num_steps, batch_size],
-            outputs=[live_preview, output, gen_status],
+            outputs=[live_preview, output, gen_status, gallery_view],
+            # "full" (default) shows Gradio's own per-component loading
+            # overlay/spinner, which re-triggers on every yield — since we
+            # yield a new live-preview frame every denoising step, that
+            # overlay flashes on and off rapidly, visually fighting with
+            # our own progress bar / ETA text. "minimal" keeps the top
+            # progress bar + desc text without the flashing overlay.
+            show_progress="minimal",
         )
+        gallery_refresh_btn.click(lambda: list_outputs(), outputs=gallery_view)
         app.load(refresh_lora_weights, inputs=lora_path, outputs=lora_path)
 
     return app

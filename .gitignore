@@ -16,3 +16,7 @@ lora_weights/*
 # captioned training dataset (images + caption .txt files)
 data/captions/*
 !data/captions/.gitkeep
+
+# generated sprites
+outputs/*
+!outputs/.gitkeep
