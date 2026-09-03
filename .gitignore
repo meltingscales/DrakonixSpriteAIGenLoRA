@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+sample.png
+
+# base model weights (multi-GB, downloaded via diffusers on first run)
+models/
+
+# trained LoRA weights
+lora_weights/*
+!lora_weights/.gitkeep
+
+# captioned training dataset (images + caption .txt files)
+data/captions/*
+!data/captions/.gitkeep
