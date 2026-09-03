@@ -71,7 +71,7 @@ Sources: [Stable Diffusion Art — How to train LoRA models](https://stable-diff
 
 ## status
 
-All five original build steps are done: dataset (`just data`, 17 curated
+All five original build steps are done: dataset (`just data`, 33 curated
 images — see AI-NOTES.md for sourcing/licensing details), training
 (`just train` / the GUI's Train tab, `src/drakonix_lora/train.py`), and
 inference (GUI's Generate tab, loads a cached base pipeline + swaps in

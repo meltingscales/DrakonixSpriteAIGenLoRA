@@ -3,14 +3,15 @@
 Usage:
     python -m drakonix_lora.fetch_dataset [--force]
 
-STATUS: sources 17 hand-curated images from bghira/free-to-use-pixelart
+STATUS: sources 33 hand-curated images from bghira/free-to-use-pixelart
 (Hugging Face, MIT-licensed metadata, images originally from Pixilart.com).
 That dataset is ~7,270 rows total but is dominated by fan art, art trades,
 and gift/commission pieces depicting other people's characters or
-copyrighted IP (Pokemon, Zelda, Mario, Metal Slug, Soul Eater, Sanrio, etc.
-all turned up while screening it) — these 17 were manually picked for (a)
-a clean flat-shaded sprite look consistent with what we want the LoRA to
-learn, and (b) no IP or third-party-character references in their own
+copyrighted IP (Pokemon, Zelda, Mario, Metal Slug, Soul Eater, Sanrio,
+One Punch Man, Kingdom Hearts, Sonic, Hatsune Miku, etc. all turned up
+while screening it) — these were manually picked for (a) a clean
+flat-shaded sprite look consistent with what we want the LoRA to learn,
+and (b) no IP or third-party-character references in their own
 title/description. See AI-NOTES.md for the full screening process.
 
 Each image is resized (nearest-neighbor, to preserve hard pixel edges) and
@@ -148,6 +149,98 @@ DATASET = [
         "https://art.pixilart.com/sr2c1384cb36aaws3.png",
         "a bright orange glowing flower on a stem, dark speckled "
         "background",
+    ),
+    (
+        "Moonrise",
+        "https://art.pixilart.com/sr2ec4e5f89b1aws3.png",
+        "a large full moon rising over a lake, dark pine trees silhouetted "
+        "against a purple night sky, reflection in the water",
+    ),
+    (
+        "landscape 2",
+        "https://art.pixilart.com/sr235cae2db2faws3.png",
+        "a small house next to trees on a green field under a cloudy sky",
+    ),
+    (
+        "forest",
+        "https://art.pixilart.com/sr28f6e21f93eaws3.png",
+        "a tree growing on a rocky cliff, covered in green moss and vines",
+    ),
+    (
+        "merry go v2",
+        "https://art.pixilart.com/sr2d844512e57aws3.png",
+        "a round cartoon character riding a small wooden boat on ocean "
+        "waves",
+    ),
+    (
+        "Rings!",
+        "https://art.pixilart.com/sr23324207e7faws3.png",
+        "a view of colorful planets and a starry galaxy in space",
+    ),
+    (
+        "Dealbreaker",
+        "https://art.pixilart.com/sr26ba0377e0eaws3.png",
+        "a purple furry mammoth-like creature wearing a green cap, with a "
+        "HELLO TRAVELER dialogue box below",
+    ),
+    (
+        "Red's town of the skies",
+        "https://art.pixilart.com/sr2cd76e2abd6aws3.png",
+        "a snowy floating town at night with glowing lit windows and a red "
+        "moon",
+    ),
+    (
+        "Exaleber",
+        "https://art.pixilart.com/sr2650cb08586aws3.png",
+        "a small creature climbing a glowing crystal tower, purple "
+        "mountains and colorful sunset sky",
+    ),
+    (
+        "Kinari",
+        "https://art.pixilart.com/sr280abbd147faws3.png",
+        "a white-haired girl character wearing a dark outfit with white "
+        "gloves and boots, pink background",
+    ),
+    (
+        "Autumn",
+        "https://art.pixilart.com/sr2c08beaf7b2aws3.png",
+        "a forest path with autumn-colored trees and a small figure "
+        "walking under a cloudy sky",
+    ),
+    (
+        "Space",
+        "https://art.pixilart.com/sr2b84041e73caws3.png",
+        "three colorful alien monster sprites floating in a starry night "
+        "sky",
+    ),
+    (
+        "Hiding in the Blue",
+        "https://art.pixilart.com/sr2cd38732d6eaws3.png",
+        "a small floating island with a tiny pink character standing on "
+        "top, blue sky background",
+    ),
+    (
+        "tree house city",
+        "https://art.pixilart.com/sr27b67d757afaws3.png",
+        "a glowing treehouse with string lights built into a large tree "
+        "at night",
+    ),
+    (
+        "corgi",
+        "https://art.pixilart.com/sr26b1197bfc4aws3.png",
+        "a happy corgi dog with its tongue out, cream and orange fur",
+    ),
+    (
+        "floating islands",
+        "https://art.pixilart.com/sr2213355f4f5aws3.png",
+        "two floating islands with rocky mountain peaks against a blue "
+        "sky",
+    ),
+    (
+        "Starry Night",
+        "https://art.pixilart.com/sr284a92a3bas004.png",
+        "a night village scene with a tall cactus, swirling stars, and "
+        "smiling moon faces in the sky",
     ),
 ]
 
