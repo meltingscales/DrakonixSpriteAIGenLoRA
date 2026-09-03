@@ -8,6 +8,7 @@ STATUS: training is wired up to `train.run_training`. Inference isn't yet
 a clear error instead of pretending to work.
 """
 
+import time
 from pathlib import Path
 
 import gradio as gr
@@ -19,6 +20,15 @@ from .train import (
     find_matching_checkpoints,
     run_training,
 )
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
 
 
 def list_lora_weights() -> list[str]:
@@ -55,8 +65,27 @@ def train(
 
     out_path = default_checkpoint_path(label, steps)
 
+    # ETA from the last few inter-step deltas rather than total elapsed
+    # since training started — the first delta would otherwise fold in
+    # model-loading time and badly skew the estimate for a short run.
+    recent_step_times: list[float] = []
+    last_step_at: float | None = None
+
     def on_step(step: int, total: int, loss: float) -> None:
-        progress(step / total, desc=f"step {step}/{total}  loss={loss:.4f}")
+        nonlocal last_step_at
+        now = time.monotonic()
+        if last_step_at is not None:
+            recent_step_times.append(now - last_step_at)
+            del recent_step_times[:-20]
+        last_step_at = now
+
+        if recent_step_times:
+            avg_step_time = sum(recent_step_times) / len(recent_step_times)
+            eta = _format_duration(avg_step_time * (total - step))
+        else:
+            eta = "estimating…"
+
+        progress(step / total, desc=f"step {step}/{total}  loss={loss:.4f}  ETA {eta}")
 
     run_training(
         base_model=base_model,
