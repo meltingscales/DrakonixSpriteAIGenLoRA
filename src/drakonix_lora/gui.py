@@ -8,10 +8,13 @@ generation via a cached `StableDiffusionPipeline` + the selected LoRA
 weights.
 """
 
+import queue
+import threading
 import time
 from pathlib import Path
 
 import gradio as gr
+import torch
 from diffusers import StableDiffusionPipeline
 
 from .device import get_device
@@ -152,6 +155,16 @@ def _ensure_lora(pipeline: StableDiffusionPipeline, lora_path: str) -> None:
     _state["lora_path"] = lora_path
 
 
+def _decode_preview(pipeline: StableDiffusionPipeline, latents: torch.Tensor):
+    """Quick VAE decode of the first image in the current batch's
+    in-progress latents, for a live "watch it draw" preview. Only the
+    first image (not the whole batch) to keep the extra decode cheap."""
+    with torch.no_grad():
+        scaled = latents[:1] / pipeline.vae.config.scaling_factor
+        decoded = pipeline.vae.decode(scaled).sample
+    return pipeline.image_processor.postprocess(decoded, output_type="pil")[0]
+
+
 def generate(
     lora_path: str,
     prompts_text: str,
@@ -160,11 +173,16 @@ def generate(
     batch_size: int,
     progress=gr.Progress(),
 ):
+    """Generator so the live-preview image can stream mid-generation.
+    diffusers' step callback is a plain synchronous nested function — it
+    can't `yield` through this function's frame — so the pipeline runs in
+    a background thread and hands preview frames back through a queue for
+    this generator to yield."""
     if not lora_path:
         raise gr.Error("no LoRA weights selected — train one first, or click Refresh")
 
-    queue = [line.strip() for line in prompts_text.splitlines() if line.strip()]
-    if not queue:
+    prompt_queue = [line.strip() for line in prompts_text.splitlines() if line.strip()]
+    if not prompt_queue:
         raise gr.Error("no prompts — enter at least one line")
 
     pipeline = _ensure_pipeline()
@@ -177,38 +195,57 @@ def generate(
     # in the total so the ETA/progress fraction stay accurate and the
     # display doesn't show e.g. "step 16/15".
     calls_per_prompt = num_steps + 1
-    total_calls = len(queue) * calls_per_prompt
+    total_calls = len(prompt_queue) * calls_per_prompt
     timer = _StepTimer()
     completed_calls = 0
     current_prompt_idx = 0
+    events: queue.Queue = queue.Queue()
 
     def on_denoise_step(pipe, step, timestep, callback_kwargs):
         nonlocal completed_calls
         completed_calls += 1
         timer.tick()
         eta = timer.eta(total_calls - completed_calls)
-        progress(
-            completed_calls / total_calls,
-            desc=(
-                f"prompt {current_prompt_idx + 1}/{len(queue)}  "
-                f"step {min(step + 1, num_steps)}/{num_steps}  ETA {eta}"
-            ),
+        desc = (
+            f"prompt {current_prompt_idx + 1}/{len(prompt_queue)}  "
+            f"step {min(step + 1, num_steps)}/{num_steps}  ETA {eta}"
         )
+        preview = _decode_preview(pipeline, callback_kwargs["latents"])
+        events.put(("step", completed_calls / total_calls, desc, preview))
         return callback_kwargs
 
-    images = []
-    for current_prompt_idx, prompt in enumerate(queue):
-        result = pipeline(
-            prompt,
-            guidance_scale=guidance,
-            num_inference_steps=num_steps,
-            num_images_per_prompt=batch_size,
-            callback_on_step_end=on_denoise_step,
-        )
-        images.extend(result.images)
+    def run() -> None:
+        nonlocal current_prompt_idx
+        try:
+            images = []
+            for current_prompt_idx, prompt in enumerate(prompt_queue):
+                result = pipeline(
+                    prompt,
+                    guidance_scale=guidance,
+                    num_inference_steps=num_steps,
+                    num_images_per_prompt=batch_size,
+                    callback_on_step_end=on_denoise_step,
+                )
+                images.extend(result.images)
+            events.put(("done", images, None, None))
+        except Exception as exc:  # re-raised on the main thread below
+            events.put(("error", exc, None, None))
 
-    status = f"generated {len(images)} image(s) from {len(queue)} prompt(s)"
-    return images, status
+    threading.Thread(target=run, daemon=True).start()
+
+    while True:
+        kind, a, b, c = events.get()
+        if kind == "step":
+            frac, desc, preview = a, b, c
+            progress(frac, desc=desc)
+            yield preview, gr.update(), desc
+        elif kind == "error":
+            raise gr.Error(f"generation failed: {a}")
+        else:  # done
+            images = a
+            status = f"generated {len(images)} image(s) from {len(prompt_queue)} prompt(s)"
+            yield gr.update(), images, status
+            return
 
 
 def build_app() -> gr.Blocks:
@@ -241,6 +278,9 @@ def build_app() -> gr.Blocks:
             batch_size = gr.Slider(1, 8, value=1, step=1, label="Images per prompt")
             generate_btn = gr.Button("Generate", variant="primary")
             gen_status = gr.Textbox(label="Status", interactive=False)
+            live_preview = gr.Image(
+                label="Live preview (denoising in progress)", interactive=False
+            )
             output = gr.Gallery(label="Generated sprites", columns=4)
 
         train_btn.click(
@@ -252,7 +292,7 @@ def build_app() -> gr.Blocks:
         generate_btn.click(
             generate,
             inputs=[lora_path, prompts, guidance, num_steps, batch_size],
-            outputs=[output, gen_status],
+            outputs=[live_preview, output, gen_status],
         )
         app.load(refresh_lora_weights, inputs=lora_path, outputs=lora_path)
 
