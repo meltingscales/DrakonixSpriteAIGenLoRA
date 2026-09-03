@@ -30,6 +30,7 @@ from .dataset import PixelArtCaptionDataset
 from .device import get_device
 
 LORA_DIR = Path("lora_weights")
+DEFAULT_BASE_MODEL = "runwayml/stable-diffusion-v1-5"
 UNET_LORA_TARGET_MODULES = ["to_k", "to_q", "to_v", "to_out.0"]
 
 # Use the text encoder's second-to-last hidden layer instead of its last —
@@ -174,7 +175,7 @@ def run_training(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--captions-dir", type=str, default="data/captions")
-    parser.add_argument("--base-model", type=str, default="runwayml/stable-diffusion-v1-5")
+    parser.add_argument("--base-model", type=str, default=DEFAULT_BASE_MODEL)
     parser.add_argument("--steps", type=int, default=1500)
     parser.add_argument("--rank", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-4)

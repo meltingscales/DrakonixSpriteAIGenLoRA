@@ -1,5 +1,7 @@
 # DrakonixSpriteAIGenLoRA
 
+Trained LoRA weights: [huggingface.co/henryfbp/DrakonixSpriteAIGenLoRA](https://huggingface.co/henryfbp/DrakonixSpriteAIGenLoRA)
+
 Sibling project to [DrakonixSpriteAIGen](../DrakonixSpriteAIGen) — that repo
 is a from-scratch class-conditional VAE (pick a label, get a sprite). This
 repo is the answer to "what if we want to generate sprites *from text

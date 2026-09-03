@@ -3,23 +3,31 @@
 Usage:
     python -m drakonix_lora.gui
 
-STATUS: training is wired up to `train.run_training`. Inference isn't yet
-— see README.md "what's left to build". The Generate button still raises
-a clear error instead of pretending to work.
+STATUS: both tabs are wired up — training via `train.run_training`,
+generation via a cached `StableDiffusionPipeline` + the selected LoRA
+weights.
 """
 
 import time
 from pathlib import Path
 
 import gradio as gr
+from diffusers import StableDiffusionPipeline
 
+from .device import get_device
 from .train import (
+    DEFAULT_BASE_MODEL,
     LORA_DIR,
     checkpoint_label,
     default_checkpoint_path,
     find_matching_checkpoints,
     run_training,
 )
+
+# Cache across calls: reloading the ~4GB base pipeline on every click would
+# make the Generate tab unusably slow. Keyed on what's currently loaded so
+# switching LoRA files swaps just the adapter, not the whole pipeline.
+_state: dict = {"pipeline": None, "lora_path": None}
 
 
 def _format_duration(seconds: float) -> str:
@@ -100,25 +108,44 @@ def train(
     return f"saved {out_path.name}", gr.Dropdown(choices=choices, value=str(out_path))
 
 
+def _ensure_pipeline() -> StableDiffusionPipeline:
+    if _state["pipeline"] is None:
+        pipeline = StableDiffusionPipeline.from_pretrained(DEFAULT_BASE_MODEL)
+        pipeline = pipeline.to(get_device())
+        _state["pipeline"] = pipeline
+    return _state["pipeline"]
+
+
+def _ensure_lora(pipeline: StableDiffusionPipeline, lora_path: str) -> None:
+    if _state["lora_path"] == lora_path:
+        return
+    if _state["lora_path"] is not None:
+        pipeline.unload_lora_weights()
+    lora_file = Path(lora_path)
+    pipeline.load_lora_weights(str(lora_file.parent), weight_name=lora_file.name)
+    _state["lora_path"] = lora_path
+
+
 def generate(lora_path: str, prompt: str, guidance: float, num_steps: int):
-    raise gr.Error(
-        "Inference isn't wired up yet — see README.md 'what's left to build'. "
-        f"Would generate {prompt!r} using LoRA {lora_path!r}."
+    if not lora_path:
+        raise gr.Error("no LoRA weights selected — train one first, or click Refresh")
+    if not prompt.strip():
+        raise gr.Error("prompt is empty")
+
+    pipeline = _ensure_pipeline()
+    _ensure_lora(pipeline, lora_path)
+
+    result = pipeline(
+        prompt, guidance_scale=guidance, num_inference_steps=int(num_steps)
     )
+    return result.images[0]
 
 
 def build_app() -> gr.Blocks:
     with gr.Blocks(title="Drakonix Sprite LoRA") as app:
         gr.Markdown("# Drakonix Sprite LoRA")
-        gr.Markdown(
-            "Training is live. Generation isn't implemented yet — "
-            "see README.md for the plan."
-        )
-
         with gr.Tab("Train LoRA"):
-            base_model = gr.Textbox(
-                label="Base model", value="runwayml/stable-diffusion-v1-5"
-            )
+            base_model = gr.Textbox(label="Base model", value=DEFAULT_BASE_MODEL)
             captions_dir = gr.Textbox(label="Captioned dataset dir", value="data/captions")
             rank = gr.Slider(1, 128, value=16, step=1, label="LoRA rank")
             steps = gr.Slider(100, 5000, value=1500, step=100, label="Training steps")
