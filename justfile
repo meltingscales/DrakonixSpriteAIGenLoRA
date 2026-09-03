@@ -1,6 +1,9 @@
 setup:
     uv sync --group dev
 
+data:
+    uv run python -m drakonix_lora.fetch_dataset
+
 gui:
     uv run python -m drakonix_lora.gui
 

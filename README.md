@@ -35,17 +35,14 @@ new *style* (pixel art) cheaply.
   hours to days. If `get_device()` reports `cpu` here, that's a hard
   blocker, not just "slower" — check `nvidia-smi`/`rocminfo` before
   starting a training run.
-- **Still need to find a working ROCm-compatible PyTorch build.**
-  `pyproject.toml` currently pins plain `torch` (CPU/CUDA wheel from
-  PyPI) — that will report no GPU at all on this AMD box. In
-  DrakonixSpriteAIGen we installed `torch==2.9.1+rocm6.4` from
-  `https://download.pytorch.org/whl/rocm6.4`, and `device.py`'s probe
-  correctly detected that it segfaults on real ops for our GPU
-  (gfx1151/Strix Halo) and fell back to CPU — but that was only tested
-  with a trivial op (`zeros + 1`). Whether a ROCm build handles the much
-  heavier conv/attention ops in an actual SD1.5 U-Net forward pass is
-  untested and needs to be verified before relying on it for training;
-  see AI-NOTES.md for what was tried.
+- **Working ROCm PyTorch build found (2026-09-03).** `torch==2.14.0+rocm7.2`
+  from `https://download.pytorch.org/whl/rocm7.2` (Python 3.11) reports
+  GPU correctly, and — unlike the ROCm 6.4 build — doesn't segfault:
+  verified with both `device.py`'s trivial-op probe and a heavier
+  conv2d+backward / attention+backward workload closer to actual U-Net
+  shape. `pyproject.toml` is pinned to this build via `[tool.uv.sources]`.
+  See AI-NOTES.md for the version-pinning details and why plain `uv add
+  torch` doesn't get you here.
 
 ## dataset requirements (from current LoRA training practice, 2026)
 
@@ -74,9 +71,6 @@ Sources: [Stable Diffusion Art — How to train LoRA models](https://stable-diff
 
 Roughly in order, since each step's output feeds the next:
 
-0. **Find/verify a working ROCm-compatible PyTorch build for this GPU**
-   (or confirm CPU is the only option and budget training time
-   accordingly). See "what we learned" above and AI-NOTES.md.
 1. **Source or build a captioned pixel-art dataset.** Either find an
    existing CC0/openly-licensed captioned pixel-art set, or caption
    sprites ourselves (manually, or with a vision-captioning model as a

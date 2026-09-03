@@ -40,9 +40,46 @@ workloads are fine, or vice versa. Worth testing directly with a tiny
 budget real time for it, since a hung/crashed multi-GB model load is
 annoying to debug.
 
-If you find a ROCm version or PyTorch build that actually works for
-gfx1151, update `device.py`'s docstring and README's "what we learned"
-section — that'd be genuinely useful to know for next time.
+**Update 2026-09-03: found a working build.** `torch==2.14.0+rocm7.2`
+(Python 3.11, from `https://download.pytorch.org/whl/rocm7.2`) works —
+`torch.cuda.is_available()` is `True`, `torch.version.hip` reports
+`7.2.53211`, and both the trivial op and a heavier conv2d+backward /
+multihead-attention+backward workload (closer to actual U-Net shape) ran
+clean with no segfault. Matches what upstream issues say: ROCm 7.1 has a
+known segfault bug on gfx1151, fixed in 7.2 (see
+[pytorch/pytorch#173367](https://github.com/pytorch/pytorch/issues/173367),
+[ROCm/legacy-rocm-build#6530](https://github.com/ROCm/legacy-rocm-build/issues/6530)).
+Kernel matters too — a regression from 6.18.3 onward is worked around by
+this box already running a newer kernel (`7.2.2-1-cachyos`).
+
+Getting `uv` to actually resolve this was its own fight, worth recording:
+
+- `pip install torch` / plain `uv add torch` picks a CUDA wheel off PyPI
+  now (PyPI hosts CUDA builds directly), not a ROCm one — you must point
+  at the ROCm index explicitly.
+- PyTorch's ROCm wheels are now published as "wheel variants" (same
+  version string, different builds per accelerator) — the index at
+  `download.pytorch.org/whl/rocm7.2` also carries a `triton-rocm` package
+  that torch depends on. That package name **also exists as an empty stub
+  on PyPI** (`triton-rocm==3.0.0rc1`, no real wheels) — if the ROCm index
+  is marked `explicit = true` in `[[tool.uv.index]]`, uv only consults it
+  for packages *directly* pinned to it via `[tool.uv.sources]`, and
+  apparently doesn't propagate that pin to `torch`'s own transitive
+  dependency on `triton-rocm` cleanly — resolution kept finding the
+  PyPI stub instead and failing. Dropping `explicit = true` (index is
+  just an extra source, not exclusive) fixed it.
+- `uv sync` resolves universally across every Python version and platform
+  allowed by `requires-python`, not just the active venv's version — so a
+  Python-3.14-branch or Windows-branch resolution failure can block `uv
+  sync` even though you're running Python 3.11 on Linux. Fixed by capping
+  `requires-python = ">=3.10,<3.14"` (cp314 ROCm wheels' triton-rocm dep
+  isn't published yet) and adding
+  `[tool.uv] environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]`
+  to stop it from trying to solve for Windows too.
+- Final working `pyproject.toml` shape: `torch>=2.14` in `dependencies`,
+  `[[tool.uv.index]]` pointing at the rocm7.2 URL, and
+  `[tool.uv.sources]` pinning both `torch` and `triton-rocm` to that
+  index by name.
 
 ## Kaggle dataset gotcha (from the sibling repo, in case a captioned pixel-art
 set ever comes from Kaggle too)

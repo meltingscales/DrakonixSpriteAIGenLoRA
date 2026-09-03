@@ -2,9 +2,11 @@
 
 torch.cuda.is_available() can return True while the GPU backend still
 segfaults on first real op (observed on ROCm 6.4 + gfx1151/Strix Halo in the
-sibling DrakonixSpriteAIGen project). A segfault can't be caught with
+sibling DrakonixSpriteAIGen project; fixed by upgrading to
+torch==2.14.0+rocm7.2 — see AI-NOTES.md). A segfault can't be caught with
 try/except since it kills the whole process, so the check runs in a
-throwaway subprocess instead.
+throwaway subprocess instead — kept even after the fix, since it's cheap
+insurance against the same class of bug on a different ROCm/kernel combo.
 
 LoRA training is realistically GPU-only (CPU training of even a small SD1.5
 LoRA is impractically slow) — if this reports "cpu", check nvidia-smi /
