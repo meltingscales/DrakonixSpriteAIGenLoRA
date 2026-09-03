@@ -30,6 +30,16 @@ from .train import (
 _state: dict = {"pipeline": None, "lora_path": None}
 
 
+EXAMPLE_PROMPTS = [
+    ["pixelart style, a fire-breathing dragon"],
+    ["pixelart style, a knight in armor holding a sword"],
+    ["pixelart style, a frog wizard casting a spell"],
+    ["pixelart style, a small cottage in a forest"],
+    ["pixelart style, a shark wearing an eyepatch"],
+    ["pixelart style, a strawberry with a cute face"],
+]
+
+
 def _format_duration(seconds: float) -> str:
     seconds = max(0, int(seconds))
     if seconds < 60:
@@ -37,6 +47,30 @@ def _format_duration(seconds: float) -> str:
     if seconds < 3600:
         return f"{seconds // 60}m {seconds % 60}s"
     return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+
+
+class _StepTimer:
+    """Rolling ETA from recent inter-tick deltas, not total elapsed time —
+    total-elapsed would fold in one-time setup (model loading) and badly
+    skew the estimate, especially for short runs."""
+
+    def __init__(self, window: int = 20):
+        self._window = window
+        self._deltas: list[float] = []
+        self._last: float | None = None
+
+    def tick(self) -> None:
+        now = time.monotonic()
+        if self._last is not None:
+            self._deltas.append(now - self._last)
+            del self._deltas[: -self._window]
+        self._last = now
+
+    def eta(self, remaining: int) -> str:
+        if not self._deltas:
+            return "estimating…"
+        avg = sum(self._deltas) / len(self._deltas)
+        return _format_duration(avg * remaining)
 
 
 def list_lora_weights() -> list[str]:
@@ -72,27 +106,11 @@ def train(
         )
 
     out_path = default_checkpoint_path(label, steps)
-
-    # ETA from the last few inter-step deltas rather than total elapsed
-    # since training started — the first delta would otherwise fold in
-    # model-loading time and badly skew the estimate for a short run.
-    recent_step_times: list[float] = []
-    last_step_at: float | None = None
+    timer = _StepTimer()
 
     def on_step(step: int, total: int, loss: float) -> None:
-        nonlocal last_step_at
-        now = time.monotonic()
-        if last_step_at is not None:
-            recent_step_times.append(now - last_step_at)
-            del recent_step_times[:-20]
-        last_step_at = now
-
-        if recent_step_times:
-            avg_step_time = sum(recent_step_times) / len(recent_step_times)
-            eta = _format_duration(avg_step_time * (total - step))
-        else:
-            eta = "estimating…"
-
+        timer.tick()
+        eta = timer.eta(total - step)
         progress(step / total, desc=f"step {step}/{total}  loss={loss:.4f}  ETA {eta}")
 
     run_training(
@@ -126,19 +144,63 @@ def _ensure_lora(pipeline: StableDiffusionPipeline, lora_path: str) -> None:
     _state["lora_path"] = lora_path
 
 
-def generate(lora_path: str, prompt: str, guidance: float, num_steps: int):
+def generate(
+    lora_path: str,
+    prompts_text: str,
+    guidance: float,
+    num_steps: int,
+    batch_size: int,
+    progress=gr.Progress(),
+):
     if not lora_path:
         raise gr.Error("no LoRA weights selected — train one first, or click Refresh")
-    if not prompt.strip():
-        raise gr.Error("prompt is empty")
+
+    queue = [line.strip() for line in prompts_text.splitlines() if line.strip()]
+    if not queue:
+        raise gr.Error("no prompts — enter at least one line")
 
     pipeline = _ensure_pipeline()
     _ensure_lora(pipeline, lora_path)
 
-    result = pipeline(
-        prompt, guidance_scale=guidance, num_inference_steps=int(num_steps)
-    )
-    return result.images[0]
+    num_steps = int(num_steps)
+    batch_size = int(batch_size)
+    # diffusers invokes the step callback num_inference_steps + 1 times per
+    # generation (verified empirically, not documented) — account for that
+    # in the total so the ETA/progress fraction stay accurate and the
+    # display doesn't show e.g. "step 16/15".
+    calls_per_prompt = num_steps + 1
+    total_calls = len(queue) * calls_per_prompt
+    timer = _StepTimer()
+    completed_calls = 0
+    current_prompt_idx = 0
+
+    def on_denoise_step(pipe, step, timestep, callback_kwargs):
+        nonlocal completed_calls
+        completed_calls += 1
+        timer.tick()
+        eta = timer.eta(total_calls - completed_calls)
+        progress(
+            completed_calls / total_calls,
+            desc=(
+                f"prompt {current_prompt_idx + 1}/{len(queue)}  "
+                f"step {min(step + 1, num_steps)}/{num_steps}  ETA {eta}"
+            ),
+        )
+        return callback_kwargs
+
+    images = []
+    for current_prompt_idx, prompt in enumerate(queue):
+        result = pipeline(
+            prompt,
+            guidance_scale=guidance,
+            num_inference_steps=num_steps,
+            num_images_per_prompt=batch_size,
+            callback_on_step_end=on_denoise_step,
+        )
+        images.extend(result.images)
+
+    status = f"generated {len(images)} image(s) from {len(queue)} prompt(s)"
+    return images, status
 
 
 def build_app() -> gr.Blocks:
@@ -160,11 +222,18 @@ def build_app() -> gr.Blocks:
             with gr.Row():
                 lora_path = gr.Dropdown(label="LoRA weights", choices=list_lora_weights())
                 refresh_btn = gr.Button("Refresh", scale=0)
-            prompt = gr.Textbox(label="Prompt", placeholder="pixel art of a fire-breathing dragon")
+            prompts = gr.Textbox(
+                label="Prompts (one per line — each line is queued and generated in turn)",
+                lines=4,
+                placeholder="pixelart style, a fire-breathing dragon\npixelart style, a knight in armor",
+            )
+            gr.Examples(examples=EXAMPLE_PROMPTS, inputs=[prompts], label="Example prompts")
             guidance = gr.Slider(1, 15, value=7.5, step=0.5, label="Guidance scale")
             num_steps = gr.Slider(10, 100, value=30, step=5, label="Inference steps")
+            batch_size = gr.Slider(1, 8, value=1, step=1, label="Images per prompt")
             generate_btn = gr.Button("Generate", variant="primary")
-            output = gr.Image(label="Generated sprite")
+            gen_status = gr.Textbox(label="Status", interactive=False)
+            output = gr.Gallery(label="Generated sprites", columns=4)
 
         train_btn.click(
             train,
@@ -173,7 +242,9 @@ def build_app() -> gr.Blocks:
         )
         refresh_btn.click(refresh_lora_weights, inputs=lora_path, outputs=lora_path)
         generate_btn.click(
-            generate, inputs=[lora_path, prompt, guidance, num_steps], outputs=output
+            generate,
+            inputs=[lora_path, prompts, guidance, num_steps, batch_size],
+            outputs=[output, gen_status],
         )
         app.load(refresh_lora_weights, inputs=lora_path, outputs=lora_path)
 
