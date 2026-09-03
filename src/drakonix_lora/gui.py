@@ -42,6 +42,17 @@ OUTPUTS_DIR = Path("outputs")
 # stand on its own instead of forcing one of our own trained LoRAs onto it.
 NO_LORA = "(none — base model only)"
 
+# Single global cancel flag — fine for this app's single-operator local-tool
+# scope (same assumption _state already makes). Set by the Cancel button,
+# checked from inside the denoising callback so a cancel can interrupt
+# mid-generation, not just between queued prompts.
+_cancel_event = threading.Event()
+
+
+class _Cancelled(Exception):
+    """Raised inside the denoising callback to unwind out of a running
+    pipeline() call when the user hits Cancel — not a real error."""
+
 
 EXAMPLE_PROMPTS = [
     ["pixelart style, a fire-breathing dragon"],
@@ -84,6 +95,19 @@ class _StepTimer:
             return "estimating…"
         avg = sum(self._deltas) / len(self._deltas)
         return _format_duration(avg * remaining)
+
+
+def _render_queue_status(prompt_queue: list[str], current_idx: int, current_desc: str) -> str:
+    lines = []
+    for i, prompt in enumerate(prompt_queue):
+        short = prompt if len(prompt) <= 50 else prompt[:47] + "..."
+        if i < current_idx:
+            lines.append(f"done      {short}")
+        elif i == current_idx:
+            lines.append(f"active >  {short}  ({current_desc})")
+        else:
+            lines.append(f"queued    {short}")
+    return "\n".join(lines)
 
 
 def list_lora_weights() -> list[str]:
@@ -214,6 +238,11 @@ def _decode_preview(
     return image
 
 
+def cancel_generation() -> str:
+    _cancel_event.set()
+    return "cancelling…"
+
+
 def generate(
     base_model: str,
     lora_path: str,
@@ -224,13 +253,18 @@ def generate(
     pixelate_enabled: bool,
     sprite_size: int,
     palette_colors: int,
-    progress=gr.Progress(),
 ):
-    """Generator so the live-preview image can stream mid-generation.
-    diffusers' step callback is a plain synchronous nested function — it
-    can't `yield` through this function's frame — so the pipeline runs in
-    a background thread and hands preview frames back through a queue for
-    this generator to yield."""
+    """Generator so the live-preview image and progress bar can stream
+    mid-generation. diffusers' step callback is a plain synchronous nested
+    function — it can't `yield` through this function's frame — so the
+    pipeline runs in a background thread and hands preview frames back
+    through a queue for this generator to yield.
+
+    Progress is rendered through our own Slider + Textbox rather than
+    gr.Progress() — the latter's built-in overlay re-triggers on every
+    yield (one per denoising step here) and visually fights with the
+    live-preview image update, causing a flash. Plain output components
+    don't have that overlay."""
     prompt_queue = [line.strip() for line in prompts_text.splitlines() if line.strip()]
     if not prompt_queue:
         raise gr.Error("no prompts — enter at least one line")
@@ -253,26 +287,30 @@ def generate(
     current_prompt_idx = 0
     events: queue.Queue = queue.Queue()
 
+    _cancel_event.clear()
+
     def on_denoise_step(pipe, step, timestep, callback_kwargs):
         nonlocal completed_calls
+        if _cancel_event.is_set():
+            raise _Cancelled()
         completed_calls += 1
         timer.tick()
         eta = timer.eta(total_calls - completed_calls)
-        desc = (
-            f"prompt {current_prompt_idx + 1}/{len(prompt_queue)}  "
-            f"step {min(step + 1, num_steps)}/{num_steps}  ETA {eta}"
-        )
+        desc = f"step {min(step + 1, num_steps)}/{num_steps}  ETA {eta}"
         preview = _decode_preview(
             pipeline, callback_kwargs["latents"], pixelate_enabled, sprite_size, palette_colors
         )
-        events.put(("step", completed_calls / total_calls, desc, preview))
+        queue_text = _render_queue_status(prompt_queue, current_prompt_idx, desc)
+        events.put(("step", completed_calls / total_calls, desc, preview, queue_text))
         return callback_kwargs
 
     def run() -> None:
         nonlocal current_prompt_idx
+        images = []
         try:
-            images = []
             for current_prompt_idx, prompt in enumerate(prompt_queue):
+                if _cancel_event.is_set():
+                    raise _Cancelled()
                 result = pipeline(
                     prompt,
                     guidance_scale=guidance,
@@ -288,23 +326,79 @@ def generate(
                         upscale_for_viewing(image, 512) if pixelate_enabled else image
                     )
             events.put(("done", images, None, None))
+        except _Cancelled:
+            events.put(("cancelled", images, None, None))
         except Exception as exc:  # re-raised on the main thread below
             events.put(("error", exc, None, None))
 
     threading.Thread(target=run, daemon=True).start()
 
+    # disable Generate / enable Cancel immediately, don't wait for the
+    # first denoising step (model loading alone can take a few seconds)
+    yield (
+        gr.update(),
+        gr.update(),
+        "starting…",
+        gr.update(),
+        0,
+        _render_queue_status(prompt_queue, 0, "starting…"),
+        gr.update(interactive=False),
+        gr.update(interactive=True),
+    )
+
     while True:
-        kind, a, b, c = events.get()
+        kind, a, b, c, *rest = events.get()
         if kind == "step":
-            frac, desc, preview = a, b, c
-            progress(frac, desc=desc)
-            yield preview, gr.update(), desc, gr.update()
+            frac, desc, preview, queue_text = a, b, c, rest[0]
+            yield (
+                preview,
+                gr.update(),
+                desc,
+                gr.update(),
+                int(frac * 100),
+                queue_text,
+                gr.update(interactive=False),
+                gr.update(interactive=True),
+            )
         elif kind == "error":
+            yield (
+                gr.update(),
+                gr.update(),
+                f"error: {a}",
+                gr.update(),
+                0,
+                gr.update(),
+                gr.update(interactive=True),
+                gr.update(interactive=False),
+            )
             raise gr.Error(f"generation failed: {a}")
+        elif kind == "cancelled":
+            images = a
+            status = f"cancelled — generated {len(images)} image(s) before stopping"
+            yield (
+                gr.update(),
+                images,
+                status,
+                list_outputs(),
+                0,
+                "cancelled",
+                gr.update(interactive=True),
+                gr.update(interactive=False),
+            )
+            return
         else:  # done
             images = a
             status = f"generated {len(images)} image(s) from {len(prompt_queue)} prompt(s)"
-            yield gr.update(), images, status, list_outputs()
+            yield (
+                gr.update(),
+                images,
+                status,
+                list_outputs(),
+                100,
+                "done",
+                gr.update(interactive=True),
+                gr.update(interactive=False),
+            )
             return
 
 
@@ -354,8 +448,22 @@ def build_app() -> gr.Blocks:
                     choices=[8, 16, 32, 64], value=16, label="Sprite size", type="value"
                 )
                 palette_colors = gr.Slider(2, 64, value=16, step=1, label="Palette colors")
-            generate_btn = gr.Button("Generate", variant="primary")
-            gen_status = gr.Textbox(label="Status", interactive=False)
+            with gr.Row():
+                generate_btn = gr.Button("Generate", variant="primary")
+                cancel_btn = gr.Button("Cancel", variant="stop", interactive=False)
+
+            with gr.Group():
+                gr.Markdown("### Queue")
+                progress_bar = gr.Slider(
+                    0, 100, value=0, label="Progress", interactive=False
+                )
+                gen_status = gr.Textbox(label="Status", interactive=False)
+                queue_status = gr.Textbox(
+                    label="Queue (one prompt per line)",
+                    interactive=False,
+                    lines=4,
+                )
+
             live_preview = gr.Image(
                 label="Live preview (denoising in progress)", interactive=False
             )
@@ -386,15 +494,30 @@ def build_app() -> gr.Blocks:
                 sprite_size,
                 palette_colors,
             ],
-            outputs=[live_preview, output, gen_status, gallery_view],
-            # "full" (default) shows Gradio's own per-component loading
-            # overlay/spinner, which re-triggers on every yield — since we
-            # yield a new live-preview frame every denoising step, that
-            # overlay flashes on and off rapidly, visually fighting with
-            # our own progress bar / ETA text. "minimal" keeps the top
-            # progress bar + desc text without the flashing overlay.
-            show_progress="minimal",
+            outputs=[
+                live_preview,
+                output,
+                gen_status,
+                gallery_view,
+                progress_bar,
+                queue_status,
+                generate_btn,
+                cancel_btn,
+            ],
+            # Progress here is our own Slider + Textbox, not gr.Progress() —
+            # its built-in overlay re-triggers on every yield (one per
+            # denoising step) and visually fights with the live-preview
+            # image update, causing a flash. "hidden" drops that overlay
+            # entirely since we don't need Gradio's own indicator at all.
+            show_progress="hidden",
         )
+        # Deliberately NOT using Gradio's built-in `cancels=` here: that
+        # would only stop this event's own consuming loop, not the actual
+        # GPU work — pipeline() runs in a separate background thread that
+        # Gradio's cancellation has no reach into. Setting _cancel_event
+        # and letting the denoising callback notice it is the only thing
+        # that actually interrupts generation in progress.
+        cancel_btn.click(cancel_generation, outputs=gen_status)
         gallery_refresh_btn.click(lambda: list_outputs(), outputs=gallery_view)
         app.load(refresh_lora_weights, inputs=lora_path, outputs=lora_path)
 
