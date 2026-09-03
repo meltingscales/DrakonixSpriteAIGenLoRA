@@ -19,6 +19,7 @@ import torch
 from diffusers import StableDiffusionPipeline
 
 from .device import get_device
+from .postprocess import pixelate, upscale_for_viewing
 from .train import (
     DEFAULT_BASE_MODEL,
     LORA_DIR,
@@ -30,10 +31,16 @@ from .train import (
 
 # Cache across calls: reloading the ~4GB base pipeline on every click would
 # make the Generate tab unusably slow. Keyed on what's currently loaded so
-# switching LoRA files swaps just the adapter, not the whole pipeline.
-_state: dict = {"pipeline": None, "lora_path": None}
+# switching LoRA files swaps just the adapter, not the whole pipeline, and
+# switching base models only reloads when the base model actually changes.
+_state: dict = {"pipeline": None, "base_model": None, "lora_path": None}
 
 OUTPUTS_DIR = Path("outputs")
+
+# Sentinel for "generate straight from the base model, no LoRA" — lets
+# trying a different base model (e.g. a community pixel-art checkpoint)
+# stand on its own instead of forcing one of our own trained LoRAs onto it.
+NO_LORA = "(none — base model only)"
 
 
 EXAMPLE_PROMPTS = [
@@ -86,6 +93,12 @@ def list_lora_weights() -> list[str]:
     return [str(p) for p in paths]
 
 
+def lora_choices() -> list[str]:
+    """Newest-trained-first, with the no-LoRA sentinel always available
+    last so it never displaces a real checkpoint as the default choice."""
+    return list_lora_weights() + [NO_LORA]
+
+
 def list_outputs() -> list[str]:
     if not OUTPUTS_DIR.exists():
         return []
@@ -103,8 +116,8 @@ def _save_output(image, prompt: str, index: int) -> Path:
 
 
 def refresh_lora_weights(current: str):
-    choices = list_lora_weights()
-    value = current if current in choices else (choices[0] if choices else None)
+    choices = lora_choices()
+    value = current if current in choices else choices[0]
     return gr.Dropdown(choices=choices, value=value)
 
 
@@ -144,12 +157,11 @@ def train(
         on_step=on_step,
     )
 
-    choices = list_lora_weights()
-    return f"saved {out_path.name}", gr.Dropdown(choices=choices, value=str(out_path))
+    return f"saved {out_path.name}", gr.Dropdown(choices=lora_choices(), value=str(out_path))
 
 
-def _ensure_pipeline() -> StableDiffusionPipeline:
-    if _state["pipeline"] is None:
+def _ensure_pipeline(base_model: str) -> StableDiffusionPipeline:
+    if _state["pipeline"] is None or _state["base_model"] != base_model:
         # SD1.5's bundled safety checker false-positives heavily on
         # non-photorealistic content — flat-shaded pixel art with
         # skin-tone-ish color blocks routinely trips it, returning a black
@@ -157,39 +169,61 @@ def _ensure_pipeline() -> StableDiffusionPipeline:
         # sprite art, not a hosted service serving untrusted users, so
         # disabling it here is the standard fix rather than a workaround.
         pipeline = StableDiffusionPipeline.from_pretrained(
-            DEFAULT_BASE_MODEL, safety_checker=None, requires_safety_checker=False
+            base_model, safety_checker=None, requires_safety_checker=False
         )
         pipeline = pipeline.to(get_device())
         _state["pipeline"] = pipeline
+        _state["base_model"] = base_model
+        # a LoRA trained against a different base's weights is meaningless
+        # here — force it to be reloaded (or left off) against the new one
+        _state["lora_path"] = None
     return _state["pipeline"]
 
 
 def _ensure_lora(pipeline: StableDiffusionPipeline, lora_path: str) -> None:
-    if _state["lora_path"] == lora_path:
+    target = lora_path if lora_path and lora_path != NO_LORA else None
+    if _state["lora_path"] == target:
         return
     if _state["lora_path"] is not None:
         pipeline.unload_lora_weights()
-    lora_file = Path(lora_path)
-    pipeline.load_lora_weights(str(lora_file.parent), weight_name=lora_file.name)
-    _state["lora_path"] = lora_path
+    if target is not None:
+        lora_file = Path(target)
+        pipeline.load_lora_weights(str(lora_file.parent), weight_name=lora_file.name)
+    _state["lora_path"] = target
 
 
-def _decode_preview(pipeline: StableDiffusionPipeline, latents: torch.Tensor):
+def _decode_preview(
+    pipeline: StableDiffusionPipeline,
+    latents: torch.Tensor,
+    pixelate_enabled: bool,
+    sprite_size: int,
+    palette_colors: int,
+):
     """Quick VAE decode of the first image in the current batch's
     in-progress latents, for a live "watch it draw" preview. Only the
-    first image (not the whole batch) to keep the extra decode cheap."""
+    first image (not the whole batch) to keep the extra decode cheap.
+    When pixelation is on, applies it here too so the preview shows what
+    the sprite is actually converging toward, not just the raw render."""
     with torch.no_grad():
         scaled = latents[:1] / pipeline.vae.config.scaling_factor
         decoded = pipeline.vae.decode(scaled).sample
-    return pipeline.image_processor.postprocess(decoded, output_type="pil")[0]
+    image = pipeline.image_processor.postprocess(decoded, output_type="pil")[0]
+    if pixelate_enabled:
+        sprite = pixelate(image, sprite_size, palette_colors)
+        image = upscale_for_viewing(sprite, display_size=image.size[0])
+    return image
 
 
 def generate(
+    base_model: str,
     lora_path: str,
     prompts_text: str,
     guidance: float,
     num_steps: int,
     batch_size: int,
+    pixelate_enabled: bool,
+    sprite_size: int,
+    palette_colors: int,
     progress=gr.Progress(),
 ):
     """Generator so the live-preview image can stream mid-generation.
@@ -197,18 +231,17 @@ def generate(
     can't `yield` through this function's frame — so the pipeline runs in
     a background thread and hands preview frames back through a queue for
     this generator to yield."""
-    if not lora_path:
-        raise gr.Error("no LoRA weights selected — train one first, or click Refresh")
-
     prompt_queue = [line.strip() for line in prompts_text.splitlines() if line.strip()]
     if not prompt_queue:
         raise gr.Error("no prompts — enter at least one line")
 
-    pipeline = _ensure_pipeline()
+    pipeline = _ensure_pipeline(base_model)
     _ensure_lora(pipeline, lora_path)
 
     num_steps = int(num_steps)
     batch_size = int(batch_size)
+    sprite_size = int(sprite_size)
+    palette_colors = int(palette_colors)
     # diffusers invokes the step callback num_inference_steps + 1 times per
     # generation (verified empirically, not documented) — account for that
     # in the total so the ETA/progress fraction stay accurate and the
@@ -229,7 +262,9 @@ def generate(
             f"prompt {current_prompt_idx + 1}/{len(prompt_queue)}  "
             f"step {min(step + 1, num_steps)}/{num_steps}  ETA {eta}"
         )
-        preview = _decode_preview(pipeline, callback_kwargs["latents"])
+        preview = _decode_preview(
+            pipeline, callback_kwargs["latents"], pixelate_enabled, sprite_size, palette_colors
+        )
         events.put(("step", completed_calls / total_calls, desc, preview))
         return callback_kwargs
 
@@ -246,8 +281,12 @@ def generate(
                     callback_on_step_end=on_denoise_step,
                 )
                 for i, image in enumerate(result.images):
+                    if pixelate_enabled:
+                        image = pixelate(image, sprite_size, palette_colors)
                     _save_output(image, prompt, i)
-                images.extend(result.images)
+                    images.append(
+                        upscale_for_viewing(image, 512) if pixelate_enabled else image
+                    )
             events.put(("done", images, None, None))
         except Exception as exc:  # re-raised on the main thread below
             events.put(("error", exc, None, None))
@@ -285,8 +324,18 @@ def build_app() -> gr.Blocks:
             train_status = gr.Textbox(label="Status", interactive=False)
 
         with gr.Tab("Generate"):
+            gen_base_model = gr.Textbox(
+                label="Base model",
+                value=DEFAULT_BASE_MODEL,
+                info=(
+                    "Any SD1.5-compatible HF repo — try a community pixel-art "
+                    "model like PublicPrompts/All-In-One-Pixel-Model here "
+                    "(pair it with 'no LoRA' below, its own trigger words are "
+                    "'pixelsprite' / '16bitscene')"
+                ),
+            )
             with gr.Row():
-                lora_path = gr.Dropdown(label="LoRA weights", choices=list_lora_weights())
+                lora_path = gr.Dropdown(label="LoRA weights", choices=lora_choices())
                 refresh_btn = gr.Button("Refresh", scale=0)
             prompts = gr.Textbox(
                 label="Prompts (one per line — each line is queued and generated in turn)",
@@ -297,6 +346,14 @@ def build_app() -> gr.Blocks:
             guidance = gr.Slider(1, 15, value=7.5, step=0.5, label="Guidance scale")
             num_steps = gr.Slider(10, 100, value=30, step=5, label="Inference steps")
             batch_size = gr.Slider(1, 8, value=1, step=1, label="Images per prompt")
+            with gr.Row():
+                pixelate_enabled = gr.Checkbox(
+                    label="Pixelate to a true sprite grid", value=True
+                )
+                sprite_size = gr.Dropdown(
+                    choices=[8, 16, 32, 64], value=16, label="Sprite size", type="value"
+                )
+                palette_colors = gr.Slider(2, 64, value=16, step=1, label="Palette colors")
             generate_btn = gr.Button("Generate", variant="primary")
             gen_status = gr.Textbox(label="Status", interactive=False)
             live_preview = gr.Image(
@@ -318,7 +375,17 @@ def build_app() -> gr.Blocks:
         refresh_btn.click(refresh_lora_weights, inputs=lora_path, outputs=lora_path)
         generate_btn.click(
             generate,
-            inputs=[lora_path, prompts, guidance, num_steps, batch_size],
+            inputs=[
+                gen_base_model,
+                lora_path,
+                prompts,
+                guidance,
+                num_steps,
+                batch_size,
+                pixelate_enabled,
+                sprite_size,
+                palette_colors,
+            ],
             outputs=[live_preview, output, gen_status, gallery_view],
             # "full" (default) shows Gradio's own per-component loading
             # overlay/spinner, which re-triggers on every yield — since we
