@@ -429,7 +429,13 @@ def build_app() -> gr.Blocks:
                 ),
             )
             with gr.Row():
-                lora_path = gr.Dropdown(label="LoRA weights", choices=lora_choices())
+                # explicit default (newest-trained-first, so this is our
+                # own most recent checkpoint) rather than relying on
+                # Gradio's implicit "select the first choice" behavior
+                _lora_choices = lora_choices()
+                lora_path = gr.Dropdown(
+                    label="LoRA weights", choices=_lora_choices, value=_lora_choices[0]
+                )
                 refresh_btn = gr.Button("Refresh", scale=0)
             prompts = gr.Textbox(
                 label="Prompts (one per line — each line is queued and generated in turn)",
