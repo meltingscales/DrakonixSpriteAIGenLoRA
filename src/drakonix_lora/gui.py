@@ -128,7 +128,15 @@ def train(
 
 def _ensure_pipeline() -> StableDiffusionPipeline:
     if _state["pipeline"] is None:
-        pipeline = StableDiffusionPipeline.from_pretrained(DEFAULT_BASE_MODEL)
+        # SD1.5's bundled safety checker false-positives heavily on
+        # non-photorealistic content — flat-shaded pixel art with
+        # skin-tone-ish color blocks routinely trips it, returning a black
+        # image instead of the render. This is local, offline generation of
+        # sprite art, not a hosted service serving untrusted users, so
+        # disabling it here is the standard fix rather than a workaround.
+        pipeline = StableDiffusionPipeline.from_pretrained(
+            DEFAULT_BASE_MODEL, safety_checker=None, requires_safety_checker=False
+        )
         pipeline = pipeline.to(get_device())
         _state["pipeline"] = pipeline
     return _state["pipeline"]
