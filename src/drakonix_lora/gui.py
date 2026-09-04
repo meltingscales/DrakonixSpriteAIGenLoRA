@@ -23,6 +23,7 @@ from .postprocess import pixelate, upscale_for_viewing
 from .train import (
     DEFAULT_BASE_MODEL,
     LORA_DIR,
+    TrainingCancelled,
     checkpoint_label,
     default_checkpoint_path,
     find_matching_checkpoints,
@@ -42,11 +43,13 @@ OUTPUTS_DIR = Path("outputs")
 # stand on its own instead of forcing one of our own trained LoRAs onto it.
 NO_LORA = "(none — base model only)"
 
-# Single global cancel flag — fine for this app's single-operator local-tool
-# scope (same assumption _state already makes). Set by the Cancel button,
-# checked from inside the denoising callback so a cancel can interrupt
-# mid-generation, not just between queued prompts.
-_cancel_event = threading.Event()
+# Global cancel flags — fine for this app's single-operator local-tool
+# scope (same assumption _state already makes). Separate flags for
+# generation vs. training since they're independent operations; each is
+# set by its own Cancel/Stop button and checked from inside the relevant
+# callback so it can interrupt mid-run, not just between queued items.
+_generate_cancel_event = threading.Event()
+_train_cancel_event = threading.Event()
 
 
 class _Cancelled(Exception):
@@ -123,6 +126,26 @@ def lora_choices() -> list[str]:
     return list_lora_weights() + [NO_LORA]
 
 
+def list_dataset_dirs() -> list[str]:
+    """Any data/captions* directory that actually has images in it —
+    picks up both fetch_dataset.py's data/captions and
+    fetch_dataset_16px.py's data/captions_16px, plus any other dataset a
+    user drops in following the same naming convention."""
+    data_dir = Path("data")
+    if not data_dir.exists():
+        return []
+    dirs = [
+        d for d in sorted(data_dir.glob("captions*")) if d.is_dir() and any(d.glob("*.png"))
+    ]
+    return [str(d) for d in dirs]
+
+
+def refresh_dataset_dirs(current: str):
+    choices = list_dataset_dirs()
+    value = current if current in choices else (choices[0] if choices else current)
+    return gr.Dropdown(choices=choices, value=value)
+
+
 def list_outputs() -> list[str]:
     if not OUTPUTS_DIR.exists():
         return []
@@ -145,6 +168,11 @@ def refresh_lora_weights(current: str):
     return gr.Dropdown(choices=choices, value=value)
 
 
+def stop_training() -> str:
+    _train_cancel_event.set()
+    return "stopping…"
+
+
 def train(
     base_model: str,
     captions_dir: str,
@@ -153,6 +181,13 @@ def train(
     force: bool,
     progress=gr.Progress(),
 ):
+    """Generator only so Start/Stop button interactive-state can be
+    toggled immediately, before training begins — the progress bar/ETA
+    itself still streams via gr.Progress() called synchronously inside
+    on_step, same as before. Unlike generate(), no background thread is
+    needed: run_training() isn't updating an image component mid-run, so
+    there's nothing that requires yielding through a nested callback's
+    frame."""
     label = checkpoint_label(base_model, captions_dir, rank)
 
     existing = find_matching_checkpoints(label, steps)
@@ -164,24 +199,45 @@ def train(
             "Check 'Force retrain' to do it anyway."
         )
 
-    out_path = default_checkpoint_path(label, steps)
+    requested_out_path = default_checkpoint_path(label, steps)
     timer = _StepTimer()
+    _train_cancel_event.clear()
+
+    yield (
+        "starting…",
+        gr.update(),
+        gr.update(interactive=False),
+        gr.update(interactive=True),
+    )
 
     def on_step(step: int, total: int, loss: float) -> None:
+        if _train_cancel_event.is_set():
+            raise TrainingCancelled()
         timer.tick()
         eta = timer.eta(total - step)
         progress(step / total, desc=f"step {step}/{total}  loss={loss:.4f}  ETA {eta}")
 
-    run_training(
+    actual_out_path = run_training(
         base_model=base_model,
         captions_dir=captions_dir,
         rank=rank,
         steps=steps,
-        out_path=out_path,
+        out_path=requested_out_path,
         on_step=on_step,
     )
 
-    return f"saved {out_path.name}", gr.Dropdown(choices=lora_choices(), value=str(out_path))
+    was_cancelled = actual_out_path != requested_out_path
+    status = (
+        f"stopped early, saved {actual_out_path.name}"
+        if was_cancelled
+        else f"saved {actual_out_path.name}"
+    )
+    yield (
+        status,
+        gr.Dropdown(choices=lora_choices(), value=str(actual_out_path)),
+        gr.update(interactive=True),
+        gr.update(interactive=False),
+    )
 
 
 def _ensure_pipeline(base_model: str) -> StableDiffusionPipeline:
@@ -239,7 +295,7 @@ def _decode_preview(
 
 
 def cancel_generation() -> str:
-    _cancel_event.set()
+    _generate_cancel_event.set()
     return "cancelling…"
 
 
@@ -287,11 +343,11 @@ def generate(
     current_prompt_idx = 0
     events: queue.Queue = queue.Queue()
 
-    _cancel_event.clear()
+    _generate_cancel_event.clear()
 
     def on_denoise_step(pipe, step, timestep, callback_kwargs):
         nonlocal completed_calls
-        if _cancel_event.is_set():
+        if _generate_cancel_event.is_set():
             raise _Cancelled()
         completed_calls += 1
         timer.tick()
@@ -309,7 +365,7 @@ def generate(
         images = []
         try:
             for current_prompt_idx, prompt in enumerate(prompt_queue):
-                if _cancel_event.is_set():
+                if _generate_cancel_event.is_set():
                     raise _Cancelled()
                 result = pipeline(
                     prompt,
@@ -407,14 +463,24 @@ def build_app() -> gr.Blocks:
         gr.Markdown("# Drakonix Sprite LoRA")
         with gr.Tab("Train LoRA"):
             base_model = gr.Textbox(label="Base model", value=DEFAULT_BASE_MODEL)
-            captions_dir = gr.Textbox(label="Captioned dataset dir", value="data/captions")
+            with gr.Row():
+                _dataset_dirs = list_dataset_dirs()
+                captions_dir = gr.Dropdown(
+                    label="Captioned dataset dir",
+                    choices=_dataset_dirs,
+                    value=_dataset_dirs[0] if _dataset_dirs else "data/captions",
+                    allow_custom_value=True,
+                )
+                dataset_dir_refresh_btn = gr.Button("Refresh", scale=0)
             rank = gr.Slider(1, 128, value=16, step=1, label="LoRA rank")
             steps = gr.Slider(100, 5000, value=1500, step=100, label="Training steps")
             force = gr.Checkbox(
                 label="Force retrain (ignore existing checkpoint with same params)",
                 value=False,
             )
-            train_btn = gr.Button("Start training", variant="primary")
+            with gr.Row():
+                train_btn = gr.Button("Start training", variant="primary")
+                stop_train_btn = gr.Button("Stop", variant="stop", interactive=False)
             train_status = gr.Textbox(label="Status", interactive=False)
 
         with gr.Tab("Generate"):
@@ -484,7 +550,16 @@ def build_app() -> gr.Blocks:
         train_btn.click(
             train,
             inputs=[base_model, captions_dir, rank, steps, force],
-            outputs=[train_status, lora_path],
+            outputs=[train_status, lora_path, train_btn, stop_train_btn],
+            show_progress="minimal",
+        )
+        # Same reasoning as the Generate tab's Cancel: Gradio's `cancels=`
+        # would only stop this event's own loop, not the actual training
+        # step running synchronously inside it. Setting _train_cancel_event
+        # and letting on_step notice it is what actually stops training.
+        stop_train_btn.click(stop_training, outputs=train_status)
+        dataset_dir_refresh_btn.click(
+            refresh_dataset_dirs, inputs=captions_dir, outputs=captions_dir
         )
         refresh_btn.click(refresh_lora_weights, inputs=lora_path, outputs=lora_path)
         generate_btn.click(
@@ -520,12 +595,14 @@ def build_app() -> gr.Blocks:
         # Deliberately NOT using Gradio's built-in `cancels=` here: that
         # would only stop this event's own consuming loop, not the actual
         # GPU work — pipeline() runs in a separate background thread that
-        # Gradio's cancellation has no reach into. Setting _cancel_event
-        # and letting the denoising callback notice it is the only thing
-        # that actually interrupts generation in progress.
+        # Gradio's cancellation has no reach into. Setting
+        # _generate_cancel_event and letting the denoising callback notice
+        # it is the only thing that actually interrupts generation in
+        # progress.
         cancel_btn.click(cancel_generation, outputs=gen_status)
         gallery_refresh_btn.click(lambda: list_outputs(), outputs=gallery_view)
         app.load(refresh_lora_weights, inputs=lora_path, outputs=lora_path)
+        app.load(refresh_dataset_dirs, inputs=captions_dir, outputs=captions_dir)
 
     return app
 

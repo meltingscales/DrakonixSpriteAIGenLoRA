@@ -40,6 +40,13 @@ UNET_LORA_TARGET_MODULES = ["to_k", "to_q", "to_v", "to_out.0"]
 CLIP_SKIP = 2
 
 
+class TrainingCancelled(Exception):
+    """Raise from an `on_step` callback to stop training early — whatever
+    progress was made up to that point is still saved, under a filename
+    reflecting the actual step count reached, not the originally
+    requested one."""
+
+
 def dataset_fingerprint(captions_dir: str) -> str:
     """8 hex chars summarizing dataset contents, so a rerun on the same
     (filename, size) pairs is recognized as the same dataset even if the
@@ -131,36 +138,48 @@ def run_training(
     batches = itertools.cycle(loader)
 
     unet.train()
-    for step in range(1, steps + 1):
-        pixel_values, captions = next(batches)
-        pixel_values = pixel_values.to(device)
+    completed_steps = 0
+    try:
+        for step in range(1, steps + 1):
+            pixel_values, captions = next(batches)
+            pixel_values = pixel_values.to(device)
 
-        with torch.no_grad():
-            latents = vae.encode(pixel_values).latent_dist.sample()
-            latents = latents * vae.config.scaling_factor
-            encoder_hidden_states = _encode_prompts(tokenizer, text_encoder, captions, device)
+            with torch.no_grad():
+                latents = vae.encode(pixel_values).latent_dist.sample()
+                latents = latents * vae.config.scaling_factor
+                encoder_hidden_states = _encode_prompts(
+                    tokenizer, text_encoder, captions, device
+                )
 
-        noise = torch.randn_like(latents)
-        timesteps = torch.randint(
-            0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=device
-        ).long()
-        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+            noise = torch.randn_like(latents)
+            timesteps = torch.randint(
+                0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=device
+            ).long()
+            noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-        model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+            model_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
-        if noise_scheduler.config.prediction_type == "v_prediction":
-            target = noise_scheduler.get_velocity(latents, noise, timesteps)
-        else:
-            target = noise
+            if noise_scheduler.config.prediction_type == "v_prediction":
+                target = noise_scheduler.get_velocity(latents, noise, timesteps)
+            else:
+                target = noise
 
-        loss = F.mse_loss(model_pred.float(), target.float())
+            loss = F.mse_loss(model_pred.float(), target.float())
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-        if on_step:
-            on_step(step, steps, loss.item())
+            completed_steps = step
+            if on_step:
+                on_step(step, steps, loss.item())
+    except TrainingCancelled:
+        pass
+
+    if completed_steps < steps:
+        out_path = out_path.with_name(
+            out_path.name.replace(f"_{steps}steps_", f"_{completed_steps}steps_")
+        )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     StableDiffusionPipeline.save_lora_weights(
