@@ -458,6 +458,19 @@ def generate(
             return
 
 
+# Browsers smooth-upscale small <img> content by default — the Gallery
+# tab reads true tiny-size sprite files straight off disk (that's correct;
+# they're meant to be real usable game assets, not pre-upscaled), so
+# without this every thumbnail would render blurry regardless of how
+# crisp the underlying pixels actually are.
+PIXEL_ART_CSS = """
+img {
+    image-rendering: -moz-crisp-edges;
+    image-rendering: pixelated;
+}
+"""
+
+
 def build_app() -> gr.Blocks:
     with gr.Blocks(title="Drakonix Sprite LoRA") as app:
         gr.Markdown("# Drakonix Sprite LoRA")
@@ -608,7 +621,7 @@ def build_app() -> gr.Blocks:
 
 
 def main() -> None:
-    build_app().launch()
+    build_app().launch(css=PIXEL_ART_CSS)
 
 
 if __name__ == "__main__":
