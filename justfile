@@ -4,6 +4,9 @@ setup:
 data:
     uv run python -m drakonix_lora.fetch_dataset
 
+data-16px:
+    uv run python -m drakonix_lora.fetch_dataset_16px
+
 gui:
     uv run python -m drakonix_lora.gui
 

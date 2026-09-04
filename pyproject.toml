@@ -10,6 +10,7 @@ dependencies = [
     "peft",
     "pillow",
     "gradio",
+    "kaggle",
 ]
 
 [dependency-groups]

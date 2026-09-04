@@ -16,6 +16,11 @@ lora_weights/*
 # captioned training dataset (images + caption .txt files)
 data/captions/*
 !data/captions/.gitkeep
+data/captions_16px/*
+!data/captions_16px/.gitkeep
+
+# raw Kaggle download (sprites.npy + sprites_labels.npy)
+data/kaggle_raw_16px/
 
 # generated sprites
 outputs/*

@@ -71,29 +71,42 @@ Sources: [Stable Diffusion Art — How to train LoRA models](https://stable-diff
 
 ## status
 
-All five original build steps are done: dataset (`just data`, 33 curated
-images — see AI-NOTES.md for sourcing/licensing details), training
-(`just train` / the GUI's Train tab, `src/drakonix_lora/train.py`), and
-inference (GUI's Generate tab, loads a cached base pipeline + swaps in
-the selected LoRA). Verified end-to-end with a real 1500-step checkpoint
-— generated output visibly carries the trained pixel-art style (flat
-shading, black outlines, blocky palette).
+All five original build steps are done: dataset, training (`just train`
+/ the GUI's Train tab, `src/drakonix_lora/train.py`), and inference
+(GUI's Generate tab — cached base pipeline, swappable base model + LoRA,
+batching/queueing with real cancellation, live denoising preview, and a
+post-process step that forces genuine low-res sprite output — see
+`src/drakonix_lora/postprocess.py`). Verified end-to-end with real
+checkpoints — generated output visibly carries the trained pixel-art
+style.
+
+Two dataset options now, deliberately kept separate (see AI-NOTES.md):
+- `just data` → `data/captions/` — 33 hand-curated medium-resolution
+  pixel-art illustrations (Pixilart via HF).
+- `just data-16px` → `data/captions_16px/` — 200 genuine 16x16 game
+  sprites (Kaggle), for training on true low-res pixel density instead
+  of a medium-density illustration look. Point either "Captions dataset
+  dir" at whichever you want to train on — they intentionally aren't
+  merged, since mixing pixel densities in one LoRA gives the model
+  conflicting size cues.
 
 Open threads, not blockers:
 - Only the UNet is trained (text encoder frozen) — reasonable first cut,
   but text-encoder LoRA is a lever if style transfer feels too shallow.
-- No inference-side upscale/palette-snap post-processing yet (see the
-  "dataset requirements" section above on why that matters for pixel
-  art).
 - Hyperparameters (rank 16, lr 1e-4, clip skip 2) are untuned defaults,
   not the result of a sweep.
+- The 16px dataset's two "character" classes (idle vs. weapon-holding)
+  and the armor/wand class are somewhat coarse captions for what's
+  visually a wider variety — could be split further if that turns out
+  to matter.
 
 ## what's already ported from DrakonixSpriteAIGen
 
-- `justfile` — `just setup` (uv sync), `just data` (fetch dataset),
-  `just train`, `just gui`, `just test`.
-- `pyproject.toml` — uv-managed, dependencies swapped for the LoRA stack
-  (`diffusers`, `transformers`, `accelerate`, `peft` instead of `kaggle`).
+- `justfile` — `just setup` (uv sync), `just data` / `just data-16px`
+  (fetch datasets), `just train`, `just gui`, `just test`.
+- `pyproject.toml` — uv-managed; dependencies are the LoRA stack
+  (`diffusers`, `transformers`, `accelerate`, `peft`) plus `kaggle` for
+  `fetch_dataset_16px.py`.
 - `src/drakonix_lora/device.py` — GPU-probe-with-subprocess pattern,
   reused verbatim (see "what we learned" above).
 - `src/drakonix_lora/gui.py` — Gradio Blocks structure (Train tab +
@@ -108,14 +121,17 @@ Open threads, not blockers:
 
 ```
 just setup
-just data    # fetch + prepare the curated dataset
+just data          # fetch + prepare the curated Pixilart-illustration dataset
+just data-16px     # fetch + prepare true-16x16 game sprites (needs a Kaggle API
+                    # token at ~/.kaggle/access_token — kaggle.com/settings > API)
 ```
 
 ## training
 
 ```
-just train                      # default hyperparameters, 1500 steps
+just train                      # data/captions, default hyperparameters, 1500 steps
 just train data/captions runwayml/stable-diffusion-v1-5 10   # quick smoke test
+just train data/captions_16px runwayml/stable-diffusion-v1-5 1500   # true-16px dataset
 ```
 
 Saves a `.safetensors` LoRA checkpoint to `lora_weights/`. Re-running with
